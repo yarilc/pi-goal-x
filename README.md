@@ -127,9 +127,13 @@ The extension exposes three tools to the model:
 
 `create_goal` and `update_goal` run sequentially to avoid concurrent state mutations. `update_goal` refuses stale in-flight runs if the active goal changed while the agent was working.
 
+`get_goal` and `update_goal` are only exposed while a goal is active. When no goal exists, or the goal is paused or complete, the extension hides them so unrelated turns do not get nudged into goal bookkeeping.
+
 ## How Autonomous Continuation Works
 
-When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt. After the agent stops, resumes, or auto-compacts, the extension queues a checkpoint message asking the agent to decide whether the goal is complete. If complete, the agent calls `update_goal`; otherwise it immediately takes the next concrete step. Each injected goal message includes a goal id, so stale continuations and stale completion attempts are ignored if the user replaces or clears the goal while a run is in flight.
+When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt. The objective is wrapped as untrusted user data so it stays task content, not extension-level control text. After the agent stops, resumes, or auto-compacts, the extension queues a compact custom checkpoint message asking the agent to decide whether the goal is complete. If complete, the agent calls `update_goal`; otherwise it immediately takes the next concrete step.
+
+Each checkpoint includes a goal id. If an old checkpoint survives compaction, reload, or goal replacement, the context hook rewrites it into a hidden stale-checkpoint notice before it reaches the model. That keeps the loop simple: there are no token budgets, turn caps, or synthetic paused states, only active/paused/complete plus checkpoint reminders.
 
 Autonomous continuation stops when:
 
