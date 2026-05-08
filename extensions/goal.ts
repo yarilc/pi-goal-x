@@ -1,6 +1,6 @@
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { matchesKey, Text } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -67,6 +67,10 @@ function normalizeRelPath(relPath: string): string {
 function statusLabel(goal: GoalRecord): string {
 	if (goal.status === "active" && goal.autoContinue) return "running";
 	return goal.status;
+}
+
+function footerStatus(goal: GoalRecord): string {
+	return `goal: ${statusLabel(goal)} - ${truncateText(goal.objective, 72)}`;
 }
 
 function truncateText(value: string, max = 120): string {
@@ -536,11 +540,21 @@ function goalEventMessageId(message: { customType?: string; details?: unknown; c
 	return typeof message.content === "string" ? extractGoalIdFromInjectedMessage(message.content) : null;
 }
 
+function hasAbortedAssistantMessage(messages: unknown[]): boolean {
+	return messages.some(isAbortedAssistantMessage);
+}
+
+function isAbortedAssistantMessage(message: unknown): boolean {
+	const raw = asRecord(message);
+	return raw?.role === "assistant" && raw.stopReason === "aborted";
+}
+
 export default function goalExtension(pi: ExtensionAPI): void {
 	let goal: GoalRecord | null = null;
 	let continuationQueuedFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
 	let runningGoalId: string | null = null;
+	let terminalInputUnsubscribe: (() => void) | null = null;
 
 	function syncGoalTools(): void {
 		try {
@@ -561,8 +575,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		continuationQueuedFor = null;
 	}
 
-	function syncGoalPromptFromDisk(ctx: ExtensionContext): void {
-		if (goal && goal.status !== "complete") goal = mergeGoalPromptFromDisk(ctx, goal);
+	function syncGoalPromptFromDisk(ctx: ExtensionContext): boolean {
+		if (!goal || goal.status === "complete") return false;
+		const previousObjective = goal.objective;
+		goal = mergeGoalPromptFromDisk(ctx, goal);
+		return goal.objective !== previousObjective;
 	}
 
 	function persist(ctx?: ExtensionContext): void {
@@ -575,6 +592,17 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		pi.appendEntry(STATE_ENTRY, goalDetails(goal));
 		syncGoalTools();
+		if (ctx) updateUI(ctx);
+	}
+
+	function refreshGoalDisplayFromDisk(ctx: ExtensionContext): void {
+		if (!goal || goal.status === "complete") return;
+		if (syncGoalPromptFromDisk(ctx)) {
+			goal = { ...goal, updatedAt: nowIso() };
+			pi.appendEntry(STATE_ENTRY, goalDetails(goal));
+		}
+		syncGoalTools();
+		updateUI(ctx);
 	}
 
 	function updateUI(ctx: ExtensionContext): void {
@@ -585,7 +613,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		ctx.ui.setStatus("goal", `goal: ${statusLabel(goal)}`);
+		ctx.ui.setStatus("goal", footerStatus(goal));
 		if (goal.status === "complete") {
 			ctx.ui.setWidget("goal", [
 				ctx.ui.theme.fg("success", "Goal complete"),
@@ -644,6 +672,24 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		setGoal(next, ctx);
 	}
 
+	function pauseActiveGoal(ctx: ExtensionContext): void {
+		if (!goal || goal.status !== "active") return;
+		goal = { ...goal, autoContinue: false };
+		stopActiveGoal("paused", "user", ctx);
+		ctx.ui.notify("Goal paused.", "info");
+	}
+
+	function syncTerminalInputPause(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		terminalInputUnsubscribe?.();
+		terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => {
+			if (matchesKey(data, "escape") && goal?.status === "active" && goal.autoContinue) {
+				pauseActiveGoal(ctx);
+			}
+			return undefined;
+		});
+	}
+
 	function sendQueuedContinuation(ctx: ExtensionContext, goalId: string): void {
 		continuationTimer = null;
 		if (!goal || goal.id !== goalId || goal.status !== "active" || !goal.autoContinue) {
@@ -668,7 +714,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			{
 				customType: GOAL_EVENT_ENTRY,
 				content: continuationPrompt(goal),
-				display: true,
+				display: false,
 				details: {
 					kind: "checkpoint",
 					goalId: goal.id,
@@ -758,9 +804,9 @@ ${trimmed}`;
 	pi.registerMessageRenderer<GoalEventDetails>(GOAL_EVENT_ENTRY, renderGoalEvent);
 
 	pi.registerCommand("goal", {
-		description: "Set, view, tweak, pause, resume, or clear a long-running goal",
+		description: "Set, view, tweak, resume, or clear a long-running goal",
 		getArgumentCompletions(prefix) {
-			return ["status", "tweak", "pause", "resume", "clear", "replace", "--no-auto"]
+			return ["status", "tweak", "resume", "clear", "replace", "--no-auto"]
 				.filter((item) => item.startsWith(prefix))
 				.map((item) => ({ value: item, label: item, description: "goal command" }));
 		},
@@ -786,17 +832,7 @@ ${trimmed}`;
 					requestGoalTweak(restText, ctx);
 					return;
 				case "pause":
-					if (!goal) {
-						ctx.ui.notify("No goal is set.", "warning");
-						return;
-					}
-					if (goal.status === "complete") {
-						ctx.ui.notify("Goal is already complete.", "warning");
-						return;
-					}
-					goal = { ...goal, autoContinue: false };
-					stopActiveGoal("paused", "user", ctx);
-					ctx.ui.notify("Goal paused.", "info");
+					ctx.ui.notify("Press Esc while a goal is running to pause it. Use /goal resume to continue.", "warning");
 					return;
 				case "resume":
 					if (!goal) {
@@ -938,11 +974,22 @@ ${trimmed}`;
 
 	pi.on("context", async (event): Promise<{ messages: typeof event.messages } | undefined> => {
 		let changed = false;
-		const messages = event.messages.map((message) => {
+		const latestGoalEventIndex = new Map<string, number>();
+		event.messages.forEach((message, index) => {
+			const queuedGoalId = goalEventMessageId(message as { customType?: string; details?: unknown; content?: unknown });
+			if (queuedGoalId) latestGoalEventIndex.set(queuedGoalId, index);
+		});
+
+		const messages = event.messages.map((message, index) => {
 			const candidate = message as { customType?: string; details?: unknown; content?: unknown };
 			const queuedGoalId = goalEventMessageId(candidate);
 			if (!queuedGoalId) return message;
-			if (goal?.id === queuedGoalId && goal.status === "active" && goal.autoContinue) return message;
+			if (
+				goal?.id === queuedGoalId
+				&& goal.status === "active"
+				&& goal.autoContinue
+				&& latestGoalEventIndex.get(queuedGoalId) === index
+			) return message;
 			changed = true;
 			const details = asRecord(candidate.details) ?? {};
 			return {
@@ -961,6 +1008,22 @@ ${trimmed}`;
 		return changed ? { messages } : undefined;
 	});
 
+	pi.on("turn_end", async (event, ctx) => {
+		if (isAbortedAssistantMessage(event.message)) {
+			pauseActiveGoal(ctx);
+			return;
+		}
+		refreshGoalDisplayFromDisk(ctx);
+	});
+
+	pi.on("message_end", async (event, ctx) => {
+		if (isAbortedAssistantMessage(event.message)) pauseActiveGoal(ctx);
+		const raw = asRecord(event.message);
+		if (raw?.role === "custom" && raw.customType === GOAL_EVENT_ENTRY && raw.display !== false) {
+			return { message: { ...event.message, display: false } as typeof event.message };
+		}
+	});
+
 	pi.on("input", async (event) => {
 		if (event.source !== "extension") return;
 		const staleGoalId = extractGoalIdFromInjectedMessage(event.text);
@@ -969,6 +1032,7 @@ ${trimmed}`;
 
 	pi.on("session_start", async (_event, ctx) => {
 		loadState(ctx);
+		syncTerminalInputPause(ctx);
 		queueContinuation(ctx, true);
 	});
 
@@ -976,7 +1040,10 @@ ${trimmed}`;
 		queueContinuation(ctx, true);
 	});
 
-	pi.on("session_tree", async (_event, ctx) => loadState(ctx));
+	pi.on("session_tree", async (_event, ctx) => {
+		loadState(ctx);
+		syncTerminalInputPause(ctx);
+	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!goal) {
@@ -994,13 +1061,17 @@ ${trimmed}`;
 		return { systemPrompt: `${event.systemPrompt}\n\n${goalPrompt(goal)}` };
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		const endedGoalId = runningGoalId;
 		runningGoalId = null;
 		continuationQueuedFor = null;
 		if (!goal || goal.status !== "active" || !goal.autoContinue) return;
 		if (endedGoalId && goal.id !== endedGoalId) return;
 		goal = mergeGoalPromptFromDisk(ctx, goal);
+		if (hasAbortedAssistantMessage(event.messages) || ctx.signal?.aborted) {
+			pauseActiveGoal(ctx);
+			return;
+		}
 		persist(ctx);
 		updateUI(ctx);
 		queueContinuation(ctx);
@@ -1008,6 +1079,8 @@ ${trimmed}`;
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		clearContinuationSchedule();
+		terminalInputUnsubscribe?.();
+		terminalInputUnsubscribe = null;
 		if (goal) persist(ctx);
 	});
 }

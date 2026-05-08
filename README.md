@@ -47,7 +47,7 @@ Ask the agent to revise the goal prompt:
 Pause or resume autonomous work:
 
 ```text
-/goal pause
+Press Esc while the agent is running
 /goal resume
 ```
 
@@ -58,7 +58,7 @@ Replace or clear the current goal:
 /goal clear
 ```
 
-There is intentionally no `/goal complete` command. The user controls create, pause, resume, replace, and clear. The agent marks the goal complete only by calling `update_goal` when the objective is actually done.
+There is intentionally no `/goal complete` command. The user controls create, resume, replace, and clear; pressing Esc pauses the active goal. The agent marks the goal complete only by calling `update_goal` when the objective is actually done.
 
 ## Command Reference
 
@@ -94,10 +94,6 @@ The agent is instructed to:
 3. Avoid marking the goal complete just because the prompt changed.
 4. Continue working under the revised prompt.
 
-### `/goal pause`
-
-Pauses the current goal. The goal remains in session state and on disk, but pi stops autonomous continuation.
-
 ### `/goal resume`
 
 Resumes a paused goal and queues another continuation if auto-continue is enabled.
@@ -115,7 +111,7 @@ Archives the current unfinished goal and removes it from the active session stat
 - `--no-auto` or `--no-start`: create the goal and keep it in context, but do not automatically send continuation prompts.
 - `--auto` or `--start`: explicitly enable autonomous continuation. This is the default.
 
-Older `--tokens`, `--token-budget`, and `--max-turns` flags are accepted for compatibility, but they are ignored. A goal runs until it is complete or the user pauses, clears, or replaces it.
+Older `--tokens`, `--token-budget`, and `--max-turns` flags are accepted for compatibility, but they are ignored. A goal runs until it is complete, the user presses Esc to pause it, or the user clears or replaces it.
 
 ## Agent Tools
 
@@ -131,14 +127,15 @@ The extension exposes three tools to the model:
 
 ## How Autonomous Continuation Works
 
-When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt. The objective is wrapped as untrusted user data so it stays task content, not extension-level control text. After the agent stops, resumes, or auto-compacts, the extension queues a compact custom checkpoint message asking the agent to decide whether the goal is complete. If complete, the agent calls `update_goal`; otherwise it immediately takes the next concrete step.
+When a goal is active and auto-continue is enabled, pi injects goal context into the system prompt. The objective is wrapped as untrusted user data so it stays task content, not extension-level control text. After the agent stops, resumes, or auto-compacts, the extension queues a hidden compact checkpoint message asking the agent to decide whether the goal is complete. If complete, the agent calls `update_goal`; otherwise it immediately takes the next concrete step.
 
-Each checkpoint includes a goal id. If an old checkpoint survives compaction, reload, or goal replacement, the context hook rewrites it into a hidden stale-checkpoint notice before it reaches the model. That keeps the loop simple: there are no token budgets, turn caps, or synthetic paused states, only active/paused/complete plus checkpoint reminders.
+Each checkpoint includes a goal id. If an old checkpoint survives compaction, reload, goal replacement, or repeated aborts, the context hook rewrites it into a hidden stale-checkpoint notice before it reaches the model. Only the latest checkpoint for the current active goal is allowed through. That keeps the loop simple: there are no token budgets, turn caps, or synthetic paused states, only active/paused/complete plus checkpoint reminders.
 
 Autonomous continuation stops when:
 
 - the agent calls `update_goal` with `status=complete`;
-- the user runs `/goal pause` or `/goal clear`.
+- the user presses Esc while the agent is running;
+- the user runs `/goal clear`.
 
 ## Local Files
 
@@ -176,7 +173,7 @@ For safety, goal file paths are constrained to `.pi/goals/` and `.pi/goals/archi
 1. Start with a concrete objective: `/goal migrate auth tests to the new helper API`.
 2. Use `/goal status` when you want to inspect progress.
 3. Use `/goal tweak ...` when you want to change direction without bypassing the agent.
-4. Use `/goal pause` before manual intervention or risky operations.
+4. Press Esc before manual intervention or risky operations.
 5. Let the agent call `update_goal` only when the goal is actually complete.
 6. Use `/goal clear` to stop tracking the current goal, or `/goal replace ...` to start a new one.
 
@@ -197,4 +194,4 @@ npm pack --dry-run
 
 ## Notes
 
-This mirrors the main Codex design split: the user controls goal creation, pause, resume, clear, and replacement; the model can only mark the current active goal complete. The extension deliberately avoids turn caps, token counters, and budget-driven status. Its job is just to keep the goal visible to the model and restart the next checkpoint when the previous turn stops.
+This mirrors the main Codex design split: the user controls goal creation, resume, clear, and replacement, and Esc pauses active work; the model can only mark the current active goal complete. The extension deliberately avoids turn caps, token counters, and budget-driven status. Its job is just to keep the goal visible to the model and restart the next checkpoint when the previous turn stops.
