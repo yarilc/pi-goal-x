@@ -1,5 +1,5 @@
 {
   "pi": {
-    "extensions": ["./goal.ts"]
+    "extensions": ["./index.ts"]
   }
 }
