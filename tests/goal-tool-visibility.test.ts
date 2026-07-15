@@ -118,6 +118,41 @@ describe("Tool visibility integration", () => {
 		piGoalExtension(mockPi as any);
 	});
 
+	it("does not access active tools while the extension factory is loading", async () => {
+		let runtimeReady = false;
+		let getActiveToolsCalls = 0;
+		let setActiveToolsCalls = 0;
+		const startupHandlers = new Map<string, Function>();
+		const startupTools: string[] = [...BASE_WORK_TOOLS];
+		const startupPi = {
+			...mockPi,
+			registerTool: () => {},
+			on: (event: string, handler: Function) => { startupHandlers.set(event, handler); },
+			getActiveTools: () => {
+				getActiveToolsCalls++;
+				if (!runtimeReady) throw new Error("Extension runtime not initialized");
+				return [...startupTools];
+			},
+			setActiveTools: (names: string[]) => {
+				setActiveToolsCalls++;
+				if (!runtimeReady) throw new Error("Extension runtime not initialized");
+				startupTools.splice(0, startupTools.length, ...names);
+			},
+		};
+
+		piGoalExtension(startupPi as any);
+
+		assert.equal(getActiveToolsCalls, 0);
+		assert.equal(setActiveToolsCalls, 0);
+		const beforeAgentStart = startupHandlers.get("before_agent_start");
+		assert.ok(beforeAgentStart, "before_agent_start handler must be registered");
+
+		runtimeReady = true;
+		await beforeAgentStart({ systemPrompt: "", prompt: "test", systemPromptOptions: {} }, createMockCtx(tmpdir(), []));
+		assert.equal(getActiveToolsCalls, 1);
+		assert.equal(setActiveToolsCalls, 1);
+	});
+
 	// ── After session_start with active goal ─────────────────────────────
 	it("active goal exposes all lifecycle tools after before_agent_start", async () => {
 		const f = testFixture();
@@ -255,7 +290,6 @@ describe("Tool visibility integration", () => {
 				sisyphus: false,
 			}, Date.UTC(2026, 5, 26, 10, 0, 0));
 			completedGoal.status = "complete" as const;
-			completedGoal.completedAt = new Date().toISOString();
 
 			const written = writeActiveGoalFile({ cwd: f.cwd } as any, completedGoal);
 			const focusEntry = goalFocusDetails(completedGoal.id, "created");

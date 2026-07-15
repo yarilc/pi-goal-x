@@ -3267,8 +3267,6 @@ promptGuidelines: [
 		},
 	}));
 
-	syncGoalTools();
-
 	pi.on("context", async (event): Promise<{ messages: typeof event.messages } | undefined> => {
 		let changed = false;
 		const latestGoalEventIndex = new Map<string, number>();

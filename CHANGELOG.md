@@ -8,6 +8,14 @@ with the `0.x` prefix indicating pre-1.0 development.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Avoided active-tool synchronization during extension loading:** Removed the
+  factory-level `syncGoalTools()` call so `pi.getActiveTools()` and
+  `pi.setActiveTools()` are only used after the extension runtime is initialized.
+
 ## [0.18.8] — 2026-06-10
 
 ### Changed
